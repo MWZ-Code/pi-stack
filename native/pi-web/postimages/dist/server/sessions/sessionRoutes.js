@@ -31,6 +31,14 @@ export function registerSessionRoutes(app, sessions, eventHub, prefix = "") {
             return reply.code(400).send({ error: errorMessage(error) });
         }
     });
+    app.post(`${prefix}/sessions/:sessionId/discard-empty`, async (request, reply) => {
+        try {
+            const body = requireRecord(request.body);
+            return await sessions.discardUnadmittedEmpty(request.params.sessionId, requireNonEmptyString(body, "creationToken"));
+        } catch (error) {
+            return reply.code(400).send({ error: errorMessage(error) });
+        }
+    });
     app.get(`${prefix}/sessions/notifications`, async (_request, reply) => {
         try {
             return await sessions.notificationCatalog();
@@ -233,11 +241,9 @@ export function registerSessionRoutes(app, sessions, eventHub, prefix = "") {
             const deliveryId = body["deliveryId"];
             const automaticAdmission = body["automaticAdmission"];
             const potetoGoal = body["potetoGoal"];
+            const replacementAdmission = body["replacementAdmission"];
             if (deliveryId === undefined && automaticAdmission === undefined) {
-                if (potetoGoal === undefined)
-                    await sessions.prompt(sessionLookupFromBody(request.params.sessionId, body), body["text"], body["streamingBehavior"], body["attachments"]);
-                else
-                    await sessions.prompt(sessionLookupFromBody(request.params.sessionId, body), body["text"], body["streamingBehavior"], body["attachments"], { potetoGoal });
+                await sessions.prompt(sessionLookupFromBody(request.params.sessionId, body), body["text"], body["streamingBehavior"], body["attachments"], { ...(potetoGoal === undefined ? {} : { potetoGoal }), ...(replacementAdmission === undefined ? {} : { replacementAdmission }) });
                 return { accepted: true };
             }
             if (typeof deliveryId !== "string" || deliveryId.trim() === "")
@@ -561,6 +567,13 @@ export function registerSessionRoutes(app, sessions, eventHub, prefix = "") {
             return reply.code(mutationErrorStatus(error)).send({ error: errorMessage(error) });
         }
     });
+    app.get(`${prefix}/sessions/:sessionId/retirement`, async (request, reply) => {
+        try {
+            return await sessions.retirementStatus(sessionLookupFromQuery(request.params.sessionId, request.query));
+        } catch (error) {
+            return reply.code(mutationErrorStatus(error)).send({ error: errorMessage(error) });
+        }
+    });
     app.post(`${prefix}/sessions/:sessionId/archive`, async (request, reply) => {
         try {
             const body = optionalRecord(request.body);
@@ -572,7 +585,7 @@ export function registerSessionRoutes(app, sessions, eventHub, prefix = "") {
             if (sessions.archiveAtCheckpoint === undefined)
                 throw new AutomaticAdmissionRejected("Replacement checkpoint capability is unavailable");
             const frozen = await sessions.archiveAtCheckpoint(ref, body["expectedIdle"]);
-            return { archived: true, automaticAdmission: frozen };
+            return { archived: frozen.retentionWarning === undefined, retired: frozen.retired === true, ...(frozen.retentionWarning === undefined ? {} : { retentionWarning: frozen.retentionWarning }), automaticAdmission: frozen };
         }
         catch (error) {
             return reply.code(mutationErrorStatus(error)).send({ error: errorMessage(error) });

@@ -58,12 +58,17 @@ export class AutomaticAdmissionStore {
         this.writing = new Set();
         this.failed = new Set();
         this.denied = new Map();
+        this.readFailures = new Map();
     }
     snapshot(ref) {
         const { key, cwd } = identity(ref);
         const record = this.read(ref);
         const durable = record !== undefined && this.directory !== undefined && !this.writing.has(key) && !this.failed.has(key);
         return { sessionId: ref.id, cwd, generation: record?.generation ?? "unarmed", allowed: durable && !this.denied.has(key) && record.allowed, durable };
+    }
+    receivingAllowed(ref) {
+        const { key } = identity(ref);
+        return !this.denied.has(key) && this.read(ref)?.allowed === true;
     }
     assertSettled(ref) {
         if (this.operations.has(identity(ref).key))
@@ -81,6 +86,8 @@ export class AutomaticAdmissionStore {
         return this.serial(ref, async () => {
             if (this.read(ref) !== undefined)
                 return this.snapshot(ref);
+            if (this.failed.has(identity(ref).key))
+                throw new AutomaticAdmissionRejected("Initial automatic admission absence is unproven");
             return this.publish(ref, true);
         });
     }
@@ -135,9 +142,41 @@ export class AutomaticAdmissionStore {
             return this.publish(ref, false);
         });
     }
+    retirementSnapshot(ref) {
+        const data = this.read(ref);
+        return { ...this.snapshot(ref), retired: data !== undefined && data.retirementGeneration === data.generation, pendingInput: data?.retirementInput ?? [] };
+    }
+    markRetired(ref, generation, pendingInput = []) {
+        return this.serial(ref, async () => {
+            const data = this.read(ref);
+            if (data?.generation !== generation || data.allowed !== false)
+                throw new AutomaticAdmissionRejected("Newer receiving control superseded retirement");
+            await this.persist(ref, { ...data, retirementGeneration: generation, retirementInput: pendingInput });
+        });
+    }
+    withRetirement(ref, generation, operation) {
+        return this.serial(ref, async () => {
+            const data = this.read(ref);
+            if (data?.generation !== generation || data.allowed !== false || data.retirementGeneration !== generation)
+                throw new AutomaticAdmissionRejected("Newer stop or input superseded successor admission");
+            return operation();
+        });
+    }
+    abandonExplicitInput(ref) {
+        const { key } = identity(ref);
+        this.failed.add(key);
+        return this.serial(ref, async () => {
+            const previous = this.records.get(key);
+            if (previous === undefined) return;
+            const controlGoal = previous.controlGoal;
+            const next = { ...previous, generation: randomUUID(), allowed: previous.allowed && !this.denied.has(key), ...(controlGoal?.state === "queued" ? { controlGoal: { ...controlGoal, state: "superseded", detail: "New human input superseded optional queued control" } } : {}) };
+            await this.persist(ref, next);
+        }).catch(() => undefined);
+    }
     explicitInput(ref) {
         return this.serial(ref, async () => {
             const { key } = identity(ref);
+            if (this.failed.has(key)) return this.snapshot(ref);
             const allowed = !this.failed.has(key) && !this.denied.has(key) && (this.read(ref)?.allowed ?? false);
             return this.publish(ref, allowed);
         });
@@ -154,6 +193,9 @@ export class AutomaticAdmissionStore {
             const data = this.read(ref);
             if (data === undefined)
                 throw new AutomaticAdmissionRejected("Durable automatic control is unavailable");
+            const history = data.abandonedControlGoals ?? [];
+            if (history.some(item => item?.id === goal.id))
+                throw new AutomaticAdmissionRejected("Abandoned control goal cannot be replayed");
             const previous = data.controlGoal;
             if (previous !== undefined) {
                 if (previous.id === goal.id) {
@@ -162,12 +204,12 @@ export class AutomaticAdmissionStore {
                         throw new AutomaticAdmissionRejected("Control goal identity changed intent");
                     return structuredClone(previous);
                 }
-                if (previous.state === "sending" || previous.state === "uncertain")
-                    throw new AutomaticAdmissionRejected("Earlier control goal admission is unresolved; retain the current goal without replay");
-                if (previous.automaticAdmission.generation === goal.automaticAdmission.generation && (previous.runId !== goal.runId || goal.sequence <= previous.sequence))
+                if (previous.automaticAdmission.generation === goal.automaticAdmission.generation && previous.runId === goal.runId && goal.sequence <= previous.sequence)
                     throw new AutomaticAdmissionRejected("Older or changed control transport sequence is superseded");
             }
-            await this.persist(ref, { ...data, controlGoal: structuredClone(goal) });
+            if (previous !== undefined)
+                history.push({ ...previous, disposition: "abandoned", abandonedAt: new Date().toISOString(), detail: "Distinct control unit superseded old transport metadata without replay" });
+            await this.persist(ref, { ...data, abandonedControlGoals: history, controlGoal: structuredClone(goal) });
             return structuredClone(goal);
         });
     }
@@ -215,11 +257,15 @@ export class AutomaticAdmissionStore {
         if (this.records.has(key))
             return this.records.get(key);
         const file = this.file(ref);
-        if (file === undefined)
+        if (file === undefined || this.readFailures.get(key) === "unavailable")
             return undefined;
         let descriptor;
+        let version;
         try {
-            if (!lstatSync(file).isFile())
+            const stat = lstatSync(file);
+            version = [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(":");
+            if (this.readFailures.get(key) === version) return undefined;
+            if (!stat.isFile())
                 throw new Error("Automatic admission metadata is not a regular file");
             descriptor = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
             const before = fstatSync(descriptor);
@@ -237,10 +283,15 @@ export class AutomaticAdmissionStore {
                 throw new Error("Invalid automatic admission metadata");
             }
             const goal = data["controlGoal"];
-            if (goal !== undefined && !validControlGoal(goal, ref))
-                throw new Error("Invalid control goal metadata");
-            const record = { version: 1, sessionId: ref.id, cwd, generation: data["generation"], allowed: data["allowed"], ...(goal === undefined ? {} : { controlGoal: goal }) };
+            let validGoal = false;
+            try { validGoal = goal !== undefined && validControlGoal(goal, ref); } catch {}
+            const history = Array.isArray(data.abandonedControlGoals) ? data.abandonedControlGoals : [];
+            if (goal !== undefined && !validGoal)
+                history.push({ disposition: "abandoned", detail: "Invalid saved control goal", original: goal });
+            const record = { version: 1, sessionId: ref.id, cwd, generation: data["generation"], allowed: data["allowed"], abandonedControlGoals: history, ...(validGoal ? { controlGoal: goal } : {}), ...(data.retirementGeneration === data.generation ? { retirementGeneration: data.retirementGeneration, retirementInput: Array.isArray(data.retirementInput) ? data.retirementInput : [] } : {}) };
             this.records.set(key, record);
+            this.readFailures.delete(key);
+            this.failed.delete(key);
             return record;
         }
         catch (error) {
@@ -249,7 +300,8 @@ export class AutomaticAdmissionStore {
                 return undefined;
             }
             this.failed.add(key);
-            throw error;
+            this.readFailures.set(key, version ?? "unavailable");
+            return undefined;
         }
         finally {
             if (descriptor !== undefined)
@@ -258,8 +310,11 @@ export class AutomaticAdmissionStore {
     }
     async publish(ref, allowed, ifAbsent = false) {
         const { cwd } = identity(ref);
-        const controlGoal = this.read(ref)?.controlGoal;
-        const record = { version: 1, sessionId: ref.id, cwd, generation: randomUUID(), allowed, ...(controlGoal === undefined ? {} : { controlGoal }) };
+        const previous = this.read(ref);
+        if (this.failed.has(identity(ref).key))
+            throw new AutomaticAdmissionRejected("Automatic admission metadata is unavailable; no authority is reconstructed");
+        const controlGoal = previous?.controlGoal;
+        const record = { version: 1, sessionId: ref.id, cwd, generation: randomUUID(), allowed, abandonedControlGoals: previous?.abandonedControlGoals ?? [], ...(controlGoal === undefined ? {} : { controlGoal }) };
         await this.persist(ref, record, ifAbsent);
         return this.snapshot(ref);
     }
@@ -315,7 +370,9 @@ export class AutomaticAdmissionStore {
             this.failed.delete(key);
         }
         catch (error) {
-            this.failed.add(key);
+            const previous = this.records.get(key);
+            if (previous?.generation !== record.generation || previous?.allowed !== record.allowed)
+                this.failed.add(key);
             throw error;
         }
         finally {

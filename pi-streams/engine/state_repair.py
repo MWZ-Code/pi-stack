@@ -74,6 +74,13 @@ def _sections_candidate(raw: bytes, before: dict | None) -> bytes:
         headings = artifacts._headings(raw[:len(raw) - size])
         top = [heading for heading in headings if heading.level == 2]
         names = [heading.name for heading in top]
+        if (len(set(names)) == len(names) and all(names) and all(names.count(name) == 1 for name in ('Goals', 'Rules', 'Log'))
+                and not raw[:top[0].span.start].strip() and (size == 0 or names[-1] == 'Log')):
+            bodies = {heading.name: raw[heading.span.start:top[index + 1].span.start if index + 1 < len(top) else len(raw)] for index, heading in enumerate(top)}
+            ordered = ['Goals', 'Rules', *[name for name in names if name not in {'Goals', 'Rules', 'Log'}], 'Log']
+            candidate = b''.join(bodies[name] for name in ordered)
+            artifacts._checked_state(candidate, book)
+            return candidate
         if (b'\0' in raw or size > len(raw) or any(names.count(name) != 1 for name in ('Goals', 'Rules', 'Log'))
                 or names[:2] != ['Goals', 'Rules'] or names[-1] != 'Log'
                 or raw[:top[0].span.start].strip() or len(set(names)) == len(names) and all(names)):
@@ -128,6 +135,8 @@ def heal_sections_locked(stream: Path) -> None:
     journal = stream / 'log/state-sections-repair.json'
     if journal.exists() or journal.is_symlink():
         operation = json.loads(migration.regular_bytes(journal))
+        if isinstance(operation, dict) and operation.get('phase') == 'abandoned':
+            return
         if (not isinstance(operation, dict) or operation.get('version') != 1
                 or operation.get('root') != str(stream.resolve()) or operation.get('phase') != 'complete'):
             apply_locked(stream, None, sections=True)
@@ -139,6 +148,19 @@ def heal_sections_locked(stream: Path) -> None:
         apply_locked(stream, plan(stream, 0, target='sections', version=3), sections=True)
 
 
+def abandon_sections_locked(stream: Path, detail: str) -> None:
+    journal = stream / 'log/state-sections-repair.json'
+    if not journal.exists() or journal.is_symlink():
+        return
+    try:
+        operation = json.loads(migration.regular_bytes(journal))
+    except ValueError:
+        return
+    if isinstance(operation, dict) and operation.get('root') == str(stream.resolve()) and operation.get('phase') not in {'complete', 'abandoned'}:
+        operation.update(phase='abandoned', detail=detail)
+        _write(journal, json.dumps(operation, indent=2, sort_keys=True) + '\n')
+
+
 def apply_locked(stream: Path, document: dict | None, *, sections: bool = False) -> dict:
     if stream.is_symlink() or not (stream / '.git').is_dir() or (stream / '.git').is_symlink():
         raise StreamsError('Prefix repair requires its owned real stream repository')
@@ -147,6 +169,8 @@ def apply_locked(stream: Path, document: dict | None, *, sections: bool = False)
     if journal.parent.is_symlink():
         raise StreamsError('Prefix repair journal directory must be owned')
     operation = json.loads(migration.regular_bytes(journal)) if journal.exists() or journal.is_symlink() else None
+    if isinstance(operation, dict) and operation.get('root') == str(root) and operation.get('phase') == 'abandoned':
+        return {'id': operation.get('plan', {}).get('id', ''), 'changed': False, 'phase': 'abandoned', 'detail': operation.get('detail', '')}
     if sections and isinstance(operation, dict) and operation.get('phase') == 'complete' and document is not None and operation.get('plan') != document:
         apply_locked(root, None, sections=True)
         operation = None

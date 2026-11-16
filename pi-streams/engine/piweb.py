@@ -11,7 +11,7 @@ from engine import StreamsError, repo_root, sessionlog
 from engine.project import default_pi_web_url
 
 
-def _run(args: list[str], stdin: str | None = None) -> subprocess.CompletedProcess[str]:
+def _run(args: list[str], stdin: str | None = None, *, timeout: float = 30) -> subprocess.CompletedProcess[str]:
     # project.toml's pi_web_url is the address a browser opens, which may be a
     # tunnel. The engine runs beside pi-web, so it follows pi-web's own config.
     env = os.environ.copy()
@@ -25,7 +25,7 @@ def _run(args: list[str], stdin: str | None = None) -> subprocess.CompletedProce
             encoding="utf-8",
             env=env,
             check=False,
-            timeout=30,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
         raise StreamsError(f"pi-web receiving boundary timed out for {args[0]}") from exc
@@ -51,8 +51,8 @@ class RecoveryRefused(StreamsError):
         self.receipt = receipt
 
 
-def call(args: list[str], stdin: str | None = None) -> dict[str, object]:
-    proc = _run(args, stdin)
+def call(args: list[str], stdin: str | None = None, *, timeout: float = 30) -> dict[str, object]:
+    proc = _run(args, stdin, timeout=timeout)
     try:
         data = json.loads(proc.stdout) if proc.stdout.strip() else {}
     except json.JSONDecodeError as exc:
@@ -78,8 +78,8 @@ def call(args: list[str], stdin: str | None = None) -> dict[str, object]:
     return data
 
 
-def list_sessions(cwd: str) -> list[dict[str, object]]:
-    data = call(["list", "--cwd", cwd])
+def list_sessions(cwd: str, *, timeout: float = 30) -> list[dict[str, object]]:
+    data = call(["list", "--cwd", cwd], timeout=timeout)
     sessions = data.get("sessions")
     if not isinstance(sessions, list):
         raise StreamsError("pi-web-cli list returned no session list")
@@ -106,8 +106,9 @@ def read_evidence(cwd: str, session_id: str, entry_id: str, expected_sha256: str
     return sessionlog.read_record(Path(raw_path), session_id, entry_id, expected_sha256, archived=archived)
 
 
-def spawn(cwd: str) -> str:
-    data = call(["spawn", cwd])
+def spawn(cwd: str, *, creation_token: str | None = None) -> str:
+    flags = [] if creation_token is None else ["--creation-token", creation_token]
+    data = call(["spawn", cwd, *flags])
     session = data.get("session")
     if not isinstance(session, dict) or not isinstance(session.get("id"), str) or not session["id"]:
         raise StreamsError("pi-web-cli spawn returned no session id")
@@ -115,6 +116,17 @@ def spawn(cwd: str) -> str:
     if not isinstance(returned_cwd, str) or Path(returned_cwd).resolve() != Path(cwd).resolve():
         raise StreamsError("spawn identity has no matching native cwd")
     return str(session["id"])
+
+
+def retirement_status(sid: str) -> dict:
+    result = call(["retirement", sid], timeout=2).get("result")
+    if not isinstance(result, dict) or result.get("sessionId") != sid:
+        raise StreamsError("Native retirement identity is unavailable")
+    return result
+
+
+def discard_empty(sid: str, creation_token: str) -> bool:
+    return call(["discard-empty", sid, creation_token]).get("result", {}).get("removed") is True
 
 
 def set_model(sid: str, model: str) -> None:
@@ -125,8 +137,8 @@ def set_thinking(sid: str, level: str) -> None:
     call(["thinking-level", sid, level])
 
 
-def session_status(sid: str) -> dict[str, object]:
-    data = call(["status", sid])
+def session_status(sid: str, *, timeout: float = 30) -> dict[str, object]:
+    data = call(["status", sid], timeout=timeout)
     session = data.get("session")
     if not isinstance(session, dict):
         raise StreamsError("pi-web-cli status returned no session")
@@ -159,13 +171,15 @@ def set_automatic_admission(sid: str, allowed: bool, *, expected_generation: str
     return result
 
 
-def prompt(sid: str, text: str, behavior: str | None = None, *, delivery_id: str | None = None, automatic: dict[str, str] | None = None, poteto_goal: str | None = None) -> dict[str, object]:
+def prompt(sid: str, text: str, behavior: str | None = None, *, delivery_id: str | None = None, automatic: dict[str, str] | None = None, poteto_goal: str | None = None, replacement: dict | None = None) -> dict[str, object]:
     # On argv, a text that starts with a dash would parse as a flag.
     flags = [] if behavior is None else [f"--{behavior}"]
     if delivery_id is not None:
         flags += ["--delivery-id", delivery_id]
     if automatic is not None:
         flags += ["--automatic-admission", json.dumps(automatic, ensure_ascii=False)]
+    if replacement is not None:
+        flags += ["--replacement-admission", json.dumps(replacement, ensure_ascii=False)]
     payload = text
     if poteto_goal is not None:
         require_poteto(sid)
@@ -221,12 +235,38 @@ def _maintenance_result(data: dict, sid: str, identity: str, cwd: str) -> dict:
     native_cwd = result.get("cwd")
     if not isinstance(native_cwd, str) or Path(native_cwd).resolve() != Path(cwd).resolve():
         raise StreamsError("maintenance receiver returned a mismatched native cwd")
-    if result.get("state") not in ("prepared", "compacting", "complete", "failed", "uncertain", "superseded", "resuming", "resumed") or type(result.get("inputSequence")) is not int or result["inputSequence"] < 0 or not isinstance(result.get("inputs"), list) or len(result["inputs"]) != result["inputSequence"]:
+    if result.get("state") not in ("prepared", "compacting", "complete", "failed", "uncertain", "superseded", "resuming", "resumed", "abandoned") or type(result.get("inputSequence")) is not int or result["inputSequence"] < 0 or not isinstance(result.get("inputs"), list) or len(result["inputs"]) != result["inputSequence"]:
         raise StreamsError("maintenance receiver returned malformed phase/input state")
     return result
 
 
 def register_stream_failure(sid: str, cwd: str, stream_dir: Path, status: dict, *, starting: bool = False, role: str = "", assignment: str = "") -> None:
+    from engine import artifacts
+    try:
+        data = artifacts._read_tick_data(stream_dir)
+        records = data.setdefault("failure_registration", {})
+        if sid in records:
+            return
+        records[sid] = {"phase": "abandoned", "detail": "Reserved optional registration; no replay"}
+        artifacts._save_tick_data(stream_dir, data)
+        _register_stream_failure(sid, cwd, stream_dir, status, starting=starting, role=role, assignment=assignment)
+    except Exception as exc:
+        try:
+            data = artifacts._read_tick_data(stream_dir)
+            data.setdefault("failure_registration", {})[sid] = {"phase": "abandoned", "detail": str(exc)}
+            artifacts._save_tick_data(stream_dir, data)
+        except Exception:
+            pass
+    else:
+        data = artifacts._read_tick_data(stream_dir)
+        data["failure_registration"][sid] = {"phase": "complete"}
+        try:
+            artifacts._save_tick_data(stream_dir, data)
+        except Exception:
+            pass
+
+
+def _register_stream_failure(sid: str, cwd: str, stream_dir: Path, status: dict, *, starting: bool = False, role: str = "", assignment: str = "") -> None:
     if status.get("failureBoundarySupport") != "persisted-turn-v1":
         return
     result = status.get("failureBoundary")
@@ -311,15 +351,12 @@ def _control_goal_result(data: dict, sid: str, cwd: str, identity: str) -> dict:
 def control_goal(sid: str, identity: str, run_id: str, sequence: int, text: str, goal: str, automatic: dict[str, str] | None) -> dict:
     if automatic is None or automatic.get("kind") not in ("wake", "recovery") or automatic.get("sessionId") != sid:
         raise StreamsError("current-goal control requires its saved receiving generation")
-    status = require_control_goal(sid)
-    if automatic["kind"] == "recovery" and (status.get("recoveryControlSupport") != "question-safe-v1" or status.get("conditionalAdmissionSupport") != "generation-cas-v1"):
-        raise StreamsError("question-safe conditional recovery control is unavailable")
     data = call(["control-goal", sid, identity, "--run-id", run_id, "--sequence", str(sequence), "--automatic-admission", json.dumps(automatic)], stdin=_poteto_payload(text, goal))
     return _control_goal_result(data, sid, automatic["cwd"], identity)
 
 
 def control_goal_status(sid: str, cwd: str, identity: str) -> dict:
-    return _control_goal_result(call(["control-goal", sid, identity, "--cwd", cwd, "--status"]), sid, cwd, identity)
+    return _control_goal_result(call(["control-goal", sid, identity, "--cwd", cwd, "--status"], timeout=2), sid, cwd, identity)
 
 
 def watch_dcr_events(sid: str, cwd: str, identity: str, index: Path, stream: str, generation: str, *, original: str = "") -> dict:
@@ -331,7 +368,7 @@ def watch_dcr_events(sid: str, cwd: str, identity: str, index: Path, stream: str
 
 
 def close_dcr_events(sid: str, cwd: str, identity: str, *, original: str = "") -> dict:
-    data = {"result": failure_maintenance(original, cwd, {"id": identity, "action": "close"}).get("events")} if original else call(["maintenance-events", sid, identity, "--cwd", cwd, "--close"])
+    data = {"result": failure_maintenance(original, cwd, {"id": identity, "action": "close"}).get("events")} if original else call(["maintenance-events", sid, identity, "--cwd", cwd, "--close"], timeout=2)
     result = data.get("result")
     if not isinstance(result, dict) or result.get("id") != identity or result.get("closed") is not True:
         raise StreamsError("native DCR event close is unconfirmed")
@@ -354,7 +391,7 @@ def compact_at_checkpoint(sid: str, identity: str, expected: dict[str, str], ins
 
 
 def maintenance_status(cwd: str, sid: str, identity: str, *, original: str = "") -> dict:
-    data = {"result": failure_maintenance(original, cwd, {"id": identity, "action": "maintenance-status"}).get("maintenance")} if original else call(["maintenance", sid, identity, "--cwd", cwd])
+    data = {"result": failure_maintenance(original, cwd, {"id": identity, "action": "maintenance-status"}).get("maintenance")} if original else call(["maintenance", sid, identity, "--cwd", cwd], timeout=2)
     return _maintenance_result(data, sid, identity, cwd)
 
 
@@ -401,7 +438,7 @@ def archive(sid: str, *, expected_idle: dict[str, str] | None = None) -> dict[st
     flags = [] if expected_idle is None else ["--expected-idle", json.dumps(expected_idle, ensure_ascii=False)]
     data = call(["archive", sid, *flags])
     result = data.get("result")
-    if not isinstance(result, dict) or (expected_idle is not None and result.get("archived") is not True):
+    if not isinstance(result, dict) or (expected_idle is not None and result.get("archived") is not True and not (expected_idle.get("stopBusy") is True and result.get("retired") is True)):
         raise StreamsError("archive publication is unconfirmed")
     if expected_idle is not None:
         frozen = result.get("automaticAdmission")

@@ -227,14 +227,20 @@ def step(stream_dir: Path, resolved: Coordinator | None, stalled: bool, *, maint
     revision = hashlib.sha256(goal.encode("utf-8")).hexdigest()
     record.desired = {"goal": goal, "body": "/poteto-mode " + goal, "revision": revision}
     save(stream_dir, record)
-    piweb.require_settings(resolved.native.status, resolved.row.model, resolved.row.thinking)
-    token, allowed = piweb.automatic_admission(resolved.native.status, resolved.row.session, resolved.row.worktree, "wake")
+    if resolved.native.status.get("observationUnavailable"):
+        if record.remote_state != "on-confirmed" or not record.remote_generation:
+            return True
+        token = {"sessionId": resolved.row.session, "cwd": resolved.row.worktree, "generation": record.remote_generation, "kind": "wake"}
+        allowed = True
+    else:
+        piweb.require_settings(resolved.native.status, resolved.row.model, resolved.row.thinking)
+        token, allowed = piweb.automatic_admission(resolved.native.status, resolved.row.session, resolved.row.worktree, "wake")
     previous = None
     if record.current_delivery:
         previous = delivery._get(stream_dir, record.current_delivery)
         if previous.control is None:
             raise StreamsError("drive delivery points to a non-control instruction")
-        if previous.session == resolved.row.session and previous.control.state != "superseded" and (previous.state not in ("prepared", "blocked") or previous.control.state in ("sending", "uncertain")):
+        if previous.session == resolved.row.session and previous.control.state != "superseded" and previous.state not in {"prepared", "blocked", "uncertain", "abandoned"}:
             try:
                 delivery.observe_control_locked(stream_dir, previous.id)
                 previous = delivery._get(stream_dir, previous.id)
@@ -243,9 +249,10 @@ def step(stream_dir: Path, resolved: Coordinator | None, stalled: bool, *, maint
                     previous.state, previous.detail = "uncertain", str(exc)
                 previous.control.state = "uncertain"
                 delivery._save(stream_dir, previous)
-                return True
         if previous.control.state in ("sending", "uncertain") or previous.state in ("sending", "uncertain"):
-            return True
+            previous.state, previous.control.state = "abandoned", "superseded"
+            previous.detail = "Abandoned uncertain transport without replay; native runtime admission serializes the next unit."
+            delivery._save(stream_dir, previous)
         same = previous.session == resolved.row.session and previous.control.revision == revision and previous.automatic == {**token, "kind": "recovery" if previous.handoff is not None else "wake"}
         if previous.control.state == "queued" and same:
             if allowed and not maintenance:
@@ -255,15 +262,10 @@ def step(stream_dir: Path, resolved: Coordinator | None, stalled: bool, *, maint
             if not maintenance:
                 delivery.send_locked(stream_dir, previous.id)
             return True
-        if previous.state == "blocked" and same and previous.control.state != "ended":
-            if allowed and not maintenance and previous.control.state == "prepared":
-                previous.state, previous.detail = "prepared", ""
-                delivery._save(stream_dir, previous)
-                try:
-                    delivery.send_locked(stream_dir, previous.id)
-                except piweb.PromptRejected:
-                    pass
-            return True
+        if (previous.state in {"blocked", "uncertain", "abandoned"} or previous.control.state == "superseded") and previous.control.revision == revision and previous.session == resolved.row.session:
+            previous.state, previous.control.state = "abandoned", "superseded"
+            delivery._save(stream_dir, previous)
+            return False
         if not allowed:
             return True
     from engine import blocked_goals
