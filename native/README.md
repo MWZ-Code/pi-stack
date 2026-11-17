@@ -28,7 +28,7 @@ Blocked-goal suppression uses distinct prompt outcomes rather than lifetime send
 
 ## Workflow child results
 
-The pi-subagents adapter makes workflow child launches await terminal results, including native children forced into background mode and explicitly asynchronous children. A launch acknowledgement does not complete a workflow or supply dependent input. The existing waiter stops at the child's launch deadline, or the built-in async timeout when no deadline is present. Missing terminal results fail that child without replay. Ordinary top-level background launches still return running acknowledgements. This patch does not reconstruct already detached JavaScript continuations.
+The pi-subagents adapter makes workflow child launches await terminal results, including native children forced into background mode and explicitly asynchronous children. A launch acknowledgement does not complete a workflow or supply dependent input. The existing waiter checks cancellation before terminal output and checks an available result before deadline expiry. A missing result fails at the child's launch deadline, or the built-in async timeout when no deadline is present, without replay. Ordinary top-level background launches still return running acknowledgements. This patch does not reconstruct already detached JavaScript continuations.
 
 ## Torn session records
 
