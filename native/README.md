@@ -26,6 +26,10 @@ Completed compaction accepts only validated transparent failure-checkpoint and w
 
 Blocked-goal suppression uses distinct prompt outcomes rather than lifetime send counts. Transcript and delivery receipts share one prompt identity. A completed assistant report of permitted progress or an applied receipt with artifact evidence resets the repetition window. This is repetition control, not independent proof that the product goal is complete. Legacy ambiguous counters remain retained as audit evidence and do not enforce permanent suppression.
 
+## Workflow child results
+
+The pi-subagents adapter makes workflow child launches await terminal results, including native children forced into background mode and explicitly asynchronous children. A launch acknowledgement does not complete a workflow or supply dependent input. The existing waiter checks cancellation before terminal output and checks an available result before deadline expiry. A missing result fails at the child's launch deadline, or the built-in async timeout when no deadline is present, without replay. Ordinary top-level background launches still return running acknowledgements. This patch does not reconstruct already detached JavaScript continuations.
+
 ## Torn session records
 
 The bundled SDK loader skips one recognized torn version3 SDK message at EOF or retains its complete concatenated suffix. The ordered message prefix identifies the lost entry and its known intact parent. A complete suffix retains its valid parent. A suffix whose predecessor is missing is reparented in memory to the torn prefix's known intact parent, with the original missing parent recorded in diagnostics. Other references to the known lost entry are reparented only to that same intact parent. All intact record content remains. A complete concatenated prefix, malformed header, second corrupt line, ambiguous suffix, duplicate ID, or incomplete or cyclic ancestry refuses loading. Other torn record formats require explicit repair rather than guessed lineage.

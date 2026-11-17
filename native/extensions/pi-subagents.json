@@ -65,11 +65,60 @@
           "new": "\t\t}\n\t}\n\n\tcallbackOwners(): string[] {\n\t\treturn [...this.timers.keys(), ...this.observedAsyncIds].sort();\n\t}\n\n\tobservedCompletionRunIds(): Set<string> {\n\t\treturn new Set(this.observedAsyncIds);\n\t}\n"
         }
       ]
+    },
+    {
+      "path": "src/runs/foreground/subagent-executor.ts",
+      "before": "9347170edae8584fa01c8722fc4f2e0c31cac42b2b3f1b2eb14204c0c2b2e484",
+      "after": "a3a6bda252030230dfd7f13b4dd6a70a10b02926ade74433b1f88d5b5ca65361",
+      "edits": [
+        {
+          "old": "\tconst resultPath = workflowAwaitedAsyncResultPath(asyncDir);\n\tconst stopOnAbort = () => { stopAsyncRun(options.state, options.runId, options.kill, { asyncDir, resolvedId: options.runId }); };",
+          "new": "\tconst resultPath = workflowAwaitedAsyncResultPath(asyncDir);\n\tconst deadlineAt = launchResult.details.deadlineAt ?? Date.now() + DEFAULT_ASYNC_TIMEOUT_MS;\n\tconst stopOnAbort = () => { stopAsyncRun(options.state, options.runId, options.kill, { asyncDir, resolvedId: options.runId }); };"
+        },
+        {
+          "old": "\t\t\tshouldAbort: () => options.signal?.aborted === true,\n\t\t\ttimeoutMessage: \"Workflow stopped before async child completed.\",",
+          "new": "\t\t\tshouldAbort: () => options.signal?.aborted === true,\n\t\t\tdeadlineAt,\n\t\t\ttimeoutMessage: \"Workflow async child stopped or exceeded its result deadline.\","
+        },
+        {
+          "old": "\tfs.rmSync(resultPath, { force: true });\n\tconst totalCost = completed.totalCost;",
+          "new": "\tif (completed.timedOut && !options.signal?.aborted) stopOnAbort();\n\tfs.rmSync(resultPath, { force: true });\n\tconst totalCost = completed.totalCost;"
+        },
+        {
+          "old": "\t\t...(options.externalAsyncRequired === true && childParams.async === undefined && workflowDefaults.async === undefined ? { workflowAwaitAsync: true } : {}),",
+          "new": "\t\tworkflowAwaitAsync: true,"
+        }
+      ]
+    },
+    {
+      "path": "src/runs/background/chain-root-attachment.ts",
+      "before": "b3445a1ee0b2c33b51fb10db4c56e5b4d70cb1bd42709286d44335af75957e1d",
+      "after": "f376023c074e69a7e1daa024a67733fdb0bcd8c164b577dd82a45e93680fa3b4",
+      "edits": [
+        {
+          "old": "options: { pollIntervalMs?: number; terminalResultGraceMs?: number; now?: () => number; shouldAbort?: () => boolean; timeoutMessage?: string } = {},",
+          "new": "options: { pollIntervalMs?: number; terminalResultGraceMs?: number; now?: () => number; shouldAbort?: () => boolean; deadlineAt?: number; timeoutMessage?: string } = {},"
+        },
+        {
+          "old": "\t\tif (result) return buildImportedResult(root, status, result);\n\t\tif (isTerminalStatus(status, root.index)) {",
+          "new": "\t\tif (result) return buildImportedResult(root, status, result);\n\t\tif (options.deadlineAt !== undefined && now() >= options.deadlineAt) return outputFromTimeout(root, status, options.timeoutMessage ?? \"Subagent timed out.\");\n\t\tif (isTerminalStatus(status, root.index)) {"
+        }
+      ]
     }
   ],
   "inputs": [
     {
       "index.ts": "a2f11dbe8e200bd8c590441316a9c6ab222318d2aa738670dedcf0e72592dde3",
+      "src/runs/background/chain-root-attachment.ts": "b3445a1ee0b2c33b51fb10db4c56e5b4d70cb1bd42709286d44335af75957e1d",
+      "src/runs/foreground/subagent-executor.ts": "9347170edae8584fa01c8722fc4f2e0c31cac42b2b3f1b2eb14204c0c2b2e484",
+      "src/extension/index.ts": "477af5fc3b32610ff4e201bc58ff350936d9af8490580c98421c641871636686",
+      "src/runs/background/notify.ts": "4445c6069959244f91083b10d18e5d4ef6fabfd117f6d2643e2774441092db41",
+      "src/runs/background/result-watcher.ts": "bd84be3e560194b3bb9138cbe10b247f92e297923d043416e310713710dd4c63",
+      "src/runs/background/scheduled-runs.ts": "7a827fd6dff3e6dd7457dfef2266141f088ef64f3006d9d5f7aaa5b071627ef0"
+    },
+    {
+      "index.ts": "3ca5ae0732d8363c9a89ca18c19f4837d6b67865b65f1a9cc58db320dd2fffad",
+      "src/runs/background/chain-root-attachment.ts": "b3445a1ee0b2c33b51fb10db4c56e5b4d70cb1bd42709286d44335af75957e1d",
+      "src/runs/foreground/subagent-executor.ts": "9347170edae8584fa01c8722fc4f2e0c31cac42b2b3f1b2eb14204c0c2b2e484",
       "src/extension/index.ts": "477af5fc3b32610ff4e201bc58ff350936d9af8490580c98421c641871636686",
       "src/runs/background/notify.ts": "4445c6069959244f91083b10d18e5d4ef6fabfd117f6d2643e2774441092db41",
       "src/runs/background/result-watcher.ts": "bd84be3e560194b3bb9138cbe10b247f92e297923d043416e310713710dd4c63",
@@ -79,8 +128,10 @@
       "index.ts": "3ca5ae0732d8363c9a89ca18c19f4837d6b67865b65f1a9cc58db320dd2fffad",
       "src/extension/index.ts": "477af5fc3b32610ff4e201bc58ff350936d9af8490580c98421c641871636686",
       "src/runs/background/notify.ts": "4445c6069959244f91083b10d18e5d4ef6fabfd117f6d2643e2774441092db41",
-      "src/runs/background/result-watcher.ts": "bd84be3e560194b3bb9138cbe10b247f92e297923d043416e310713710dd4c63",
-      "src/runs/background/scheduled-runs.ts": "7a827fd6dff3e6dd7457dfef2266141f088ef64f3006d9d5f7aaa5b071627ef0"
+      "src/runs/background/result-watcher.ts": "fb63fdd2b3ff4e8634cd03f60365c395f848e79c835ddee9822bdc9392504e67",
+      "src/runs/background/scheduled-runs.ts": "7a827fd6dff3e6dd7457dfef2266141f088ef64f3006d9d5f7aaa5b071627ef0",
+      "src/runs/foreground/subagent-executor.ts": "9347170edae8584fa01c8722fc4f2e0c31cac42b2b3f1b2eb14204c0c2b2e484",
+      "src/runs/background/chain-root-attachment.ts": "b3445a1ee0b2c33b51fb10db4c56e5b4d70cb1bd42709286d44335af75957e1d"
     }
   ]
 }
