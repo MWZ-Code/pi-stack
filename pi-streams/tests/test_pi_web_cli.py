@@ -426,6 +426,103 @@ class PiWebCliTests(unittest.TestCase):
             ("POST", "/api/sessions/sess%2F2/thinking-level", "", {"level": "xhigh"}),
         ])
 
+    def test_fork_restores_thinking_without_rewriting_the_model(self) -> None:
+        self.stub.set_routes([
+            ("GET", "/api/sessions/sess%2F1/status", 200, FORK_SOURCE_STATUS),
+            ("POST", "/api/sessions/sess%2F1/commands/run", 200, FORK_SELECT),
+            ("POST", "/api/sessions/sess%2F1/commands/respond", 200, FORK_DONE),
+            ("GET", "/api/sessions/sess%2F2/status", 200, {
+                "sessionId": "sess/2",
+                "model": {"provider": "acme", "id": "model-1"},
+                "thinkingLevel": "low",
+            }),
+            ("POST", "/api/sessions/sess%2F2/model", 200, {
+                "sessionId": "sess/2",
+                "model": {"provider": "other", "id": "model-9"},
+                "thinkingLevel": "off",
+            }),
+            ("POST", "/api/sessions/sess%2F2/thinking-level", 200, FORK_MATCHED_STATUS),
+        ])
+        proc = self.run_cli("fork", "sess/1")
+        self.assert_completed(proc, 0, FORK_STDOUT)
+        self.assertEqual(self.stub.requests, [
+            ("GET", "/api/sessions/sess%2F1/status", "", None),
+            ("POST", "/api/sessions/sess%2F1/commands/run", "", {"text": "/fork"}),
+            ("POST", "/api/sessions/sess%2F1/commands/respond", "", {"requestId": "req-1", "value": "entry-9"}),
+            ("GET", "/api/sessions/sess%2F2/status", "", None),
+            ("POST", "/api/sessions/sess%2F2/thinking-level", "", {"level": "xhigh"}),
+        ])
+
+    def test_fork_keeps_new_id_when_model_restore_fails(self) -> None:
+        self.stub.set_routes([
+            ("GET", "/api/sessions/sess%2F1/status", 200, FORK_SOURCE_STATUS),
+            ("POST", "/api/sessions/sess%2F1/commands/run", 200, FORK_SELECT),
+            ("POST", "/api/sessions/sess%2F1/commands/respond", 200, FORK_DONE),
+            ("GET", "/api/sessions/sess%2F2/status", 200, {
+                "sessionId": "sess/2",
+                "model": {"provider": "other", "id": "model-9"},
+                "thinkingLevel": "low",
+            }),
+            ("POST", "/api/sessions/sess%2F2/model", 409, {"error": "model missing"}),
+            ("POST", "/api/sessions/sess%2F2/thinking-level", 200, FORK_MATCHED_STATUS),
+        ])
+        proc = self.run_cli("fork", "sess/1")
+        self.assert_completed(proc, 1, """\
+{
+  "ok": false,
+  "status": 409,
+  "session": {
+    "id": "sess/2",
+    "entryId": "entry-9"
+  },
+  "error": "forked session settings are unconfirmed"
+}
+""")
+        self.assertEqual(self.stub.requests, [
+            ("GET", "/api/sessions/sess%2F1/status", "", None),
+            ("POST", "/api/sessions/sess%2F1/commands/run", "", {"text": "/fork"}),
+            ("POST", "/api/sessions/sess%2F1/commands/respond", "", {"requestId": "req-1", "value": "entry-9"}),
+            ("GET", "/api/sessions/sess%2F2/status", "", None),
+            ("POST", "/api/sessions/sess%2F2/model", "", {"provider": "acme", "modelId": "model-1"}),
+        ])
+
+    def test_fork_does_not_set_thinking_when_model_restore_misses(self) -> None:
+        self.stub.set_routes([
+            ("GET", "/api/sessions/sess%2F1/status", 200, FORK_SOURCE_STATUS),
+            ("POST", "/api/sessions/sess%2F1/commands/run", 200, FORK_SELECT),
+            ("POST", "/api/sessions/sess%2F1/commands/respond", 200, FORK_DONE),
+            ("GET", "/api/sessions/sess%2F2/status", 200, {
+                "sessionId": "sess/2",
+                "model": {"provider": "other", "id": "model-9"},
+                "thinkingLevel": "low",
+            }),
+            ("POST", "/api/sessions/sess%2F2/model", 200, {
+                "sessionId": "sess/2",
+                "model": {"provider": "other", "id": "model-9"},
+                "thinkingLevel": "low",
+            }),
+            ("POST", "/api/sessions/sess%2F2/thinking-level", 200, FORK_MATCHED_STATUS),
+        ])
+        proc = self.run_cli("fork", "sess/1")
+        self.assert_completed(proc, 1, """\
+{
+  "ok": false,
+  "status": 200,
+  "session": {
+    "id": "sess/2",
+    "entryId": "entry-9"
+  },
+  "error": "forked session settings are unconfirmed"
+}
+""")
+        self.assertEqual(self.stub.requests, [
+            ("GET", "/api/sessions/sess%2F1/status", "", None),
+            ("POST", "/api/sessions/sess%2F1/commands/run", "", {"text": "/fork"}),
+            ("POST", "/api/sessions/sess%2F1/commands/respond", "", {"requestId": "req-1", "value": "entry-9"}),
+            ("GET", "/api/sessions/sess%2F2/status", "", None),
+            ("POST", "/api/sessions/sess%2F2/model", "", {"provider": "acme", "modelId": "model-1"}),
+        ])
+
     def test_fork_rejects_source_session_id(self) -> None:
         self.stub.set_routes([
             ("GET", "/api/sessions/sess%2F1/status", 200, FORK_SOURCE_STATUS),
