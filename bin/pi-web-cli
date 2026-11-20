@@ -176,16 +176,16 @@ def cmd_fork(sid: str, at: str | None) -> int:
     current = _status_settings(data) if code == 200 else None
     if current is None:
         return _fork_unrestored(code, new_id, entry)
-    if current != source:
+    if (current[0], current[1]) != (provider, model_id):
         code, data = req("POST", f"/api/sessions/{forked}/model", {"provider": provider, "modelId": model_id})
+        current = _status_settings(data) if code == 200 else None
+        if current is None or (current[0], current[1]) != (provider, model_id):
+            return _fork_unrestored(code, new_id, entry)
+    if current[2] != thinking:
+        code, data = req("POST", f"/api/sessions/{forked}/thinking-level", {"level": thinking})
         current = _status_settings(data) if code == 200 else None
         if current is None:
             return _fork_unrestored(code, new_id, entry)
-        if current[2] != thinking:
-            code, data = req("POST", f"/api/sessions/{forked}/thinking-level", {"level": thinking})
-            current = _status_settings(data) if code == 200 else None
-            if current is None:
-                return _fork_unrestored(code, new_id, entry)
     if current != source:
         return _fork_unrestored(code, new_id, entry)
     got_provider, got_model, got_thinking = current
