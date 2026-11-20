@@ -92,6 +92,115 @@ def cmd_commands(sid: str) -> int:
     return out({"ok": ok, "status": code, "commands": data}, ok)
 
 
+def _status_settings(data: object) -> tuple[str, str, str] | None:
+    if not isinstance(data, dict) or data.get("error"):
+        return None
+    model = data.get("model")
+    provider = model.get("provider") if isinstance(model, dict) else None
+    model_id = model.get("id") if isinstance(model, dict) else None
+    thinking = data.get("thinkingLevel")
+    if not isinstance(provider, str) or provider == "" or not isinstance(model_id, str) or model_id == "" or not isinstance(thinking, str) or thinking == "":
+        return None
+    return provider, model_id, thinking
+
+
+def _fork_choice(data: object) -> tuple[str, list[str]] | None:
+    if not isinstance(data, dict) or data.get("type") != "select":
+        return None
+    request_id = data.get("requestId")
+    options = data.get("options")
+    if not isinstance(request_id, str) or request_id == "" or not isinstance(options, list) or not options:
+        return None
+    values: list[str] = []
+    for option in options:
+        if not isinstance(option, dict):
+            return None
+        value = option.get("value")
+        if not isinstance(value, str) or value == "":
+            return None
+        values.append(value)
+    return request_id, values
+
+
+def _done_session_id(data: object) -> str | None:
+    if not isinstance(data, dict) or data.get("type") != "done":
+        return None
+    session = data.get("session")
+    if not isinstance(session, dict):
+        return None
+    session_id = session.get("id")
+    if not isinstance(session_id, str) or session_id == "":
+        return None
+    return session_id
+
+
+def _fork_unrestored(status: int, session_id: str, entry_id: str) -> int:
+    return out({
+        "ok": False,
+        "status": status,
+        "session": {"id": session_id, "entryId": entry_id},
+        "error": "forked session settings are unconfirmed",
+    }, False)
+
+
+def cmd_fork(sid: str, at: str | None) -> int:
+    quoted = urllib.parse.quote(sid, safe="")
+    code, data = req("GET", f"/api/sessions/{quoted}/status")
+    source = _status_settings(data) if code == 200 else None
+    if source is None:
+        return out({"ok": False, "status": code, "error": "session status has no model and thinking level"}, False)
+    provider, model_id, thinking = source
+    code, data = req("POST", f"/api/sessions/{quoted}/commands/run", {"text": "/fork"})
+    if isinstance(data, dict) and data.get("type") == "unsupported":
+        message = data.get("message")
+        if not isinstance(message, str) or message == "":
+            message = "fork is unsupported"
+        return out({"ok": False, "status": code, "error": message}, False)
+    choice = _fork_choice(data) if code == 200 else None
+    if choice is None:
+        return out({"ok": False, "status": code, "error": "fork did not return a user-message choice"}, False)
+    request_id, values = choice
+    if at is None:
+        entry = values[0]
+    elif at in values:
+        entry = at
+    else:
+        return out({"ok": False, "status": code, "error": "entry is not a fork option"}, False)
+    code, data = req("POST", f"/api/sessions/{quoted}/commands/respond", {"requestId": request_id, "value": entry}, timeout=120)
+    new_id = _done_session_id(data) if code == 200 else None
+    if new_id is None or new_id == sid:
+        error = "fork returned the source session" if new_id == sid else "fork did not create a session"
+        return out({"ok": False, "status": code, "error": error}, False)
+    forked = urllib.parse.quote(new_id, safe="")
+    code, data = req("GET", f"/api/sessions/{forked}/status")
+    current = _status_settings(data) if code == 200 else None
+    if current is None:
+        return _fork_unrestored(code, new_id, entry)
+    if (current[0], current[1]) != (provider, model_id):
+        code, data = req("POST", f"/api/sessions/{forked}/model", {"provider": provider, "modelId": model_id})
+        current = _status_settings(data) if code == 200 else None
+        if current is None or (current[0], current[1]) != (provider, model_id):
+            return _fork_unrestored(code, new_id, entry)
+    if current[2] != thinking:
+        code, data = req("POST", f"/api/sessions/{forked}/thinking-level", {"level": thinking})
+        current = _status_settings(data) if code == 200 else None
+        if current is None:
+            return _fork_unrestored(code, new_id, entry)
+    if current != source:
+        return _fork_unrestored(code, new_id, entry)
+    got_provider, got_model, got_thinking = current
+    return out({
+        "ok": True,
+        "status": code,
+        "session": {
+            "id": new_id,
+            "entryId": entry,
+            "model": {"provider": got_provider, "id": got_model},
+            "thinkingLevel": got_thinking,
+        },
+    }, True)
+
+
 class UsageError(Exception):
     pass
 
@@ -252,6 +361,10 @@ def main(argv: list[str]) -> int:
     st.add_argument("sid")
     cm = sub.add_parser("commands")
     cm.add_argument("sid")
+    fork_help = "Fork before the chosen user message the way pi /fork does. The default is the newest user message."
+    fork = sub.add_parser("fork", help=fork_help, description=fork_help)
+    fork.add_argument("sid")
+    fork.add_argument("--at", help="User-message entry to fork before. The default is the newest user message.")
     control = sub.add_parser("automatic-admission")
     control.add_argument("sid")
     control.add_argument("mode", choices=("on", "off"))
@@ -394,6 +507,8 @@ def main(argv: list[str]) -> int:
         return cmd_status(args.sid)
     if args.cmd == "commands":
         return cmd_commands(args.sid)
+    if args.cmd == "fork":
+        return cmd_fork(args.sid, args.at)
     if args.cmd == "automatic-admission":
         if args.initialize_if_absent and args.mode != "on":
             return out({"ok": False, "error": "initial admission requires on"}, False)
