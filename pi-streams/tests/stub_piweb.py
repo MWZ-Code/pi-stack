@@ -20,6 +20,7 @@ LIVE_PORT = 8504
 
 class StubPiWeb:
     def __init__(self) -> None:
+        self.required_session_cwds: dict[str, str] = {}
         self.routes: list[tuple[str, str, int, object]] = []
         self.requests: list[tuple[str, str, str, object]] = []
         self._lock = threading.Lock()
@@ -123,6 +124,18 @@ class StubPiWeb:
             self.requests.append((handler.command, parsed.path, parsed.query, body))
             routes = list(self.routes)
         status, payload = _match(handler.command, parsed.path, routes)
+        cwd = urllib.parse.parse_qs(parsed.query).get("cwd", [None])[0]
+        target = re.fullmatch(r"/api/sessions/([^/]+)(?:/(.+))?", parsed.path)
+        if target and target[2] != "location" and target[1] in self.required_session_cwds:
+            expected_cwd = self.required_session_cwds[target[1]]
+            if handler.command == "POST":
+                supplied = body.get("cwd") if isinstance(body, dict) else None
+                missing = "cwd field must be a string"
+            else:
+                supplied = cwd
+                missing = "cwd query parameter is required"
+            if supplied != expected_cwd:
+                status, payload = (400, {"error": missing}) if supplied is None else (404, {"error": "Session not found"})
         encoded = json.dumps(payload).encode("utf-8")
         handler.send_response(status)
         handler.send_header("Content-Type", "application/json")
