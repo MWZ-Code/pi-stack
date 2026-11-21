@@ -11,7 +11,8 @@ import unittest
 from tick_support import HEADER, PROMPTS, TickCase, got_list, got_prompt, got_status, info, row, status
 
 DAILY = "daily\tschedule\t\t09:00\tPost the daily status to ZF."
-ROWS = "rows\tcmd\tcat watch.txt\t\tCheck the row count against the template."
+ROWS_CMD = "if [ -f watch.txt ]; then cat watch.txt; else printf 'watch input missing\\n' >&2; exit 1; fi"
+ROWS = f"rows\tcmd\t{ROWS_CMD}\t\tCheck the row count against the template."
 ROWS_ACTION = "subscription rows: Check the row count against the template."
 PR = "pr\tgh-pr\talienczf/pi-stack#412\t\tReview the PR once its checks pass."
 PR_ACTION = "subscription pr: Review the PR once its checks pass."
@@ -206,7 +207,7 @@ class SubscriptionTests(TickCase):
         self.assertEqual(self.state(self.etl)["subscriptions"], {
             "rows": {
                 "fingerprint": "exit=0 sha256=16de491a8b693cc8f9c638ece7086732da962b93c0fa37b1ce087da1a72d46bd",
-                "watch": ["cmd", "cat watch.txt", ""],
+                "watch": ["cmd", ROWS_CMD, ""],
             },
         })
 
@@ -225,7 +226,7 @@ class SubscriptionTests(TickCase):
         self.assertEqual((failed.returncode, failed.stdout, failed.stderr), (0, f"{self.etl}\tsubscription=1\n", ""))
         self.assertEqual(self.stub.requests[-1], got_prompt(
             "coord-1",
-            f"pi-streams tick 2026-10-06T12:15:00Z:\n{ROWS_ACTION} / cat: watch.txt: No such file or directory",
+            f"pi-streams tick 2026-10-06T12:15:00Z:\n{ROWS_ACTION} / watch input missing",
             "followUp",
         ))
         self.assertEqual(
